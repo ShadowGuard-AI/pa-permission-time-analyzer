@@ -86,6 +86,10 @@ def analyze_permissions(path: str, days: int, exclude_patterns: pathspec.PathSpe
     cutoff_timestamp = time.time() - (days * 24 * 60 * 60)  # Calculate cutoff timestamp
 
     if os.path.isfile(path):
+        # A lone file is matched against the patterns by its basename
+        # only, while the directory branch below matches by path
+        # relative to the root. The same exclude file therefore means
+        # two different things depending on how the tool was pointed.
         if not is_excluded(os.path.basename(path), exclude_patterns):
             results.append(analyze_file(path, cutoff_timestamp))
         return results
@@ -122,6 +126,12 @@ def analyze_file(file_path: str, cutoff_timestamp: float) -> Dict[str, Union[str
         last_modified_time = stat_info.st_mtime
         permissions = stat.filemode(stat_info.st_mode)
 
+        # Both stamps must be old, and the access stamp is the weak
+        # half of that test. On a relatime mount atime lags real reads,
+        # and a backup or antivirus pass that does update it makes a
+        # long untouched file look used. Dormant here means neither
+        # stamp moved, which is a statement about the filesystem's
+        # bookkeeping as much as about people using the file.
         is_dormant = (last_access_time < cutoff_timestamp) and (last_modified_time < cutoff_timestamp)
 
         return {
@@ -133,6 +143,11 @@ def analyze_file(file_path: str, cutoff_timestamp: float) -> Dict[str, Union[str
         }
     except OSError as e:
         logging.error(f"Error getting file stats for {file_path}: {e}")
+        # An empty dict goes back into the results list, not a skip.
+        # The report writer then raises KeyError on file_path, so one
+        # broken symlink in a large tree ends the run with no report
+        # at all. The try around the call in the directory walk does
+        # not help: this function already swallowed the error.
         return {}
 
 def load_exclude_patterns(exclude_file: str) -> pathspec.PathSpec:
