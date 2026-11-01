@@ -3,6 +3,7 @@ import os
 import stat
 import time
 import logging
+import sys
 from pathlib import Path
 from typing import List, Dict, Union
 import pathspec
@@ -21,7 +22,7 @@ def setup_argparse() -> argparse.ArgumentParser:
         argparse.ArgumentParser: The configured argument parser.
     """
     parser = argparse.ArgumentParser(
-        description="Analyzes permission usage patterns over time to identify dormant or underutilized permissions."
+        description="Reports files whose access and modification timestamps are older than a cutoff, based on timestamps alone. No usage data is read."
     )
 
     parser.add_argument(
@@ -69,7 +70,7 @@ def is_excluded(path: str, exclude_patterns: pathspec.PathSpec = None) -> bool:
 
 def analyze_permissions(path: str, days: int, exclude_patterns: pathspec.PathSpec = None) -> List[Dict[str, Union[str, int, bool]]]:
     """
-    Analyzes the permissions of files and directories within the given path.
+    Analyzes the permissions of files within the given path. Directories themselves are not analyzed.
 
     Args:
         path (str): The path to analyze.
@@ -85,14 +86,14 @@ def analyze_permissions(path: str, days: int, exclude_patterns: pathspec.PathSpe
     cutoff_timestamp = time.time() - (days * 24 * 60 * 60)  # Calculate cutoff timestamp
 
     if os.path.isfile(path):
-        if not is_excluded(path, exclude_patterns):
+        if not is_excluded(os.path.basename(path), exclude_patterns):
             results.append(analyze_file(path, cutoff_timestamp))
         return results
     elif os.path.isdir(path):
         for root, _, files in os.walk(path):
             for file in files:
                 full_path = os.path.join(root, file)
-                if not is_excluded(full_path, exclude_patterns):
+                if not is_excluded(os.path.relpath(full_path, path), exclude_patterns):
                     try:
                         results.append(analyze_file(full_path, cutoff_timestamp))
                     except OSError as e:
@@ -147,7 +148,7 @@ def load_exclude_patterns(exclude_file: str) -> pathspec.PathSpec:
     try:
         with open(exclude_file, "r") as f:
             lines = f.readlines()
-            return pathspec.PathSpec(lines)
+            return pathspec.PathSpec.from_lines("gitwildmatch", lines)
     except FileNotFoundError:
         logging.warning(f"Exclude file not found: {exclude_file}")
         return None
@@ -155,7 +156,7 @@ def load_exclude_patterns(exclude_file: str) -> pathspec.PathSpec:
         logging.error(f"Error loading exclude file {exclude_file}: {e}")
         return None
 
-def generate_report(results: List[Dict[str, Union[str, int, bool]]], output_file: str) -> None:
+def generate_report(results: List[Dict[str, Union[str, int, bool]]], output_file: str) -> bool:
     """
     Generates a report of the permission analysis results and writes it to a file.
 
@@ -176,9 +177,11 @@ def generate_report(results: List[Dict[str, Union[str, int, bool]]], output_file
                 f.write(f"  Is Dormant: {result['is_dormant']}\n")
                 f.write("\n")
         logging.info(f"Report saved to {output_file}")
+        return True
 
     except Exception as e:
         logging.error(f"Error writing report to file: {e}")
+        return False
 
 def generate_rich_table(results: List[Dict[str, Union[str, int, bool]]]) -> Table:
     """
@@ -218,11 +221,17 @@ def main():
     # Input validation
     if not os.path.exists(args.path):
         logging.error(f"Error: The specified path '{args.path}' does not exist.")
-        return
+        sys.exit(1)
 
     if args.days <= 0:
         logging.error("Error: The number of days must be a positive integer.")
-        return
+        sys.exit(1)
+
+    input_resolved = os.path.realpath(args.path)
+    output_resolved = os.path.realpath(args.output)
+    if output_resolved == input_resolved or (os.path.isdir(args.path) and output_resolved.startswith(input_resolved + os.sep)):
+        logging.error("Error: The report path must not be the analyzed file or a file inside the analyzed directory.")
+        sys.exit(1)
 
     exclude_patterns = None
     if args.exclude:
@@ -230,15 +239,24 @@ def main():
 
     try:
         results = analyze_permissions(args.path, args.days, exclude_patterns)
-        generate_report(results, args.output)
+
+        if not results:
+            logging.error("No files analyzed: nothing was scanned, so no report was written.")
+            sys.exit(1)
+
+        if not generate_report(results, args.output):
+            sys.exit(1)
 
         console = Console()
         table = generate_rich_table(results)
         console.print(table)
 
 
+    except SystemExit:
+        raise
     except Exception as e:
         logging.exception(f"An unexpected error occurred: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
