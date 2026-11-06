@@ -91,7 +91,9 @@ def analyze_permissions(path: str, days: int, exclude_patterns: pathspec.PathSpe
         # relative to the root. The same exclude file therefore means
         # two different things depending on how the tool was pointed.
         if not is_excluded(os.path.basename(path), exclude_patterns):
-            results.append(analyze_file(path, cutoff_timestamp))
+            result = analyze_file(path, cutoff_timestamp)
+            if result is not None:
+                results.append(result)
         return results
     elif os.path.isdir(path):
         for root, _, files in os.walk(path):
@@ -99,7 +101,9 @@ def analyze_permissions(path: str, days: int, exclude_patterns: pathspec.PathSpe
                 full_path = os.path.join(root, file)
                 if not is_excluded(os.path.relpath(full_path, path), exclude_patterns):
                     try:
-                        results.append(analyze_file(full_path, cutoff_timestamp))
+                        result = analyze_file(full_path, cutoff_timestamp)
+                        if result is not None:
+                            results.append(result)
                     except OSError as e:
                         logging.error(f"Error analyzing {full_path}: {e}")
     else:
@@ -143,12 +147,11 @@ def analyze_file(file_path: str, cutoff_timestamp: float) -> Dict[str, Union[str
         }
     except OSError as e:
         logging.error(f"Error getting file stats for {file_path}: {e}")
-        # An empty dict goes back into the results list, not a skip.
-        # The report writer then raises KeyError on file_path, so one
-        # broken symlink in a large tree ends the run with no report
-        # at all. The try around the call in the directory walk does
-        # not help: this function already swallowed the error.
-        return {}
+        # Return None so the caller skips this file. The report writer
+        # expects every entry to carry file_path, so returning an
+        # empty dict here would raise KeyError and end the run with
+        # no report at all.
+        return None
 
 def load_exclude_patterns(exclude_file: str) -> pathspec.PathSpec:
     """
